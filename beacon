@@ -7,43 +7,46 @@ log () {
 	level="${1}"
 	shift
 	case "${level}" in
+		(critical) ansi="41;30" ;;
 		(fatal) ansi="41;30" ;;
 		(err) ansi="31" ;;
 		(warn) ansi="33" ;;
+		(info) ansi="34" ;;
 		(debug) ansi="90" ;;
 		(*) ansi="45;30" ;;
 	esac
 	printf "\033[${ansi}m%s: %s: %s: %s\033[m\n" "${0}" "${FUNCNAME[2]}" "${BASH_LINENO[1]}" "$*" >&2
 }
 
-fatal () {
-	log fatal "${@}"
-}
+critical () { log critical "${@}"; }
+fatal () { log fatal "${@}"; }
+err () { log err "${@}"; }
+warn () { log warn "${@}"; }
+info () { log info "${@}"; }
+debug () { log debug "${@}"; }
+_grey () { printf '\033[90m' >&2; }
+_rst () { printf '\033[m' >&2; }
 
-err () {
-	log err "${@}"
-}
+# Usage:
+# if logif -1; then hide; fi # never show this specific diagnostic
+# if logif 0; then debug; fi # show all diagnostics
+# if logif 1; then info; fi
+# if logif 2; then warning; fi
+# if logif 3; then error; fi # only show error and fatal diagnostics
+# if logif 4; then fatal; fi # only show fatal diagnostics
+# if logif 999; then critical; fi # always this specific diagnostic
+logif () {
+	local required_loglevel
 
-warn () {
-	log warn "${@}"
-}
-
-debug () {
-	log debug "${@}"
-}
-
-_grey () {
-	printf '\033[90m' >&2
-}
-
-_rst () {
-	printf '\033[m' >&2
+	required_loglevel="${1}"
+	[ -n "${required_loglevel}" ] || required_loglevel="999" # if not providing a parameter, always log
+	[ "${LOGLEVEL}" -le "${required_loglevel}" ]
 }
 
 # Remove temporary directory and cd back to a sane place
 _cleanup () {
 	printf '\n'
-	if [ "${DEBUG}" = "on" ]
+	if logif 0
 	then
 		warn "Cleaning up..."
 		_grey
@@ -55,7 +58,7 @@ _cleanup () {
 	warn "Exiting"
 }
 
-# Override git command to make it DEBUG aware
+# Override git command to make it LOGLEVEL aware
 git () {
 	local subcomand
 	declare -i status
@@ -64,7 +67,7 @@ git () {
 	subcomand="${1}"
 	[ -n "${subcomand}" ] || { command git; return 1; }
 	shift
-	if [ "${DEBUG}" = "on" ]
+	if logif 0
 	then
 		_grey
 			1>&2 command git "${subcomand}" "${@}" ; status="${?}"
@@ -82,24 +85,24 @@ _check_ref () {
 
 # Returns empty string if there is no next command
 _fetch_next_command () {
-	local next_id_file next_id stdin
+	local id_file cmd_id stdin
 
-	next_id_file="${1}"
+	id_file="${1}"
 
 	_check_ref "${BEACON_ID}" \
 		|| { warn "Pull failed (ref '${BEACON_ID}' doesnt exist)"; return 1; }
 	git pull c2 -- "${BEACON_ID}" \
 		|| { warn "Pull failed"; return 1; }
-	next_id="$(comm -23 <(command git log --author=in --format=%ae | sort) <(command git log --author=out --format=%ae | sort) | sort -n | head -1)"
-	[ -n "${next_id}" ] || return 1
-	printf '%s' "${next_id}" 1>| "${next_id_file:-next_id}"
-	stdin="$(command git log -1 --author="${next_id}" --format=%s ; printf .)" ; stdin="${stdin%.}"
+	cmd_id="$(comm -23 <(command git log --author=in --format=%ae | sort) <(command git log --author=out --format=%ae | sort) | sort -n | head -1)"
+	[ -n "${cmd_id}" ] || return 1
+	printf '%s' "${cmd_id}" 1>| "${id_file:-cmd_id}"
+	stdin="$(command git log -1 --author="${cmd_id}" --format=%s ; printf .)" ; stdin="${stdin%.}"
 	printf '%s' "${stdin}"
-	[ "${DEBUG}" = "on" ] && debug "${next_id@A}"
+	logif 0 && debug "${cmd_id@A}"
 }
 
 _send_result () {
-	local stdin stdout_file stderr_file status pipestatus elapsed next_id_file next_id
+	local stdin stdout_file stderr_file status pipestatus elapsed id_file cmd_id
 
 	stdin="${1}"
 	stdout_file="${2}"
@@ -107,17 +110,17 @@ _send_result () {
 	status="${4}"
 	pipestatus="${5}"
 	elapsed="${6}"
-	next_id_file="${7}"
+	id_file="${7}"
 
-	next_id="$(cat -- "${next_id_file:-next_id}")"
+	cmd_id="$(cat -- "${id_file:-cmd_id}")"
 
 	printf '%s' "${status}" 1>| status
 	printf '%s' "${pipestatus}" 1>| pipestatus
 	printf '%s' "${elapsed}" 1>| elapsed
 
-	git add --force "${stdout_file:-stdout}" "${stderr_file:-stderr}" status pipestatus elapsed
+	git add --force "${stdout_file:-stdout}" "${stderr_file:-stderr}" status pipestatus elapsed "${id_file}"
 	
-	GIT_AUTHOR_NAME="out" GIT_AUTHOR_EMAIL="${next_id}" \
+	GIT_AUTHOR_NAME="out" GIT_AUTHOR_EMAIL="${cmd_id}" \
 		git commit --allow-empty --message="${stdin}"
 
 	git reset --hard
@@ -133,19 +136,20 @@ _fetch_eval () {
 	unset pipestatus
 	local cmd status pipestatus elapsed
 
-	cmd="$(_fetch_next_command next_id ; printf .)" ; cmd="${cmd%.}"
-	[ "${DEBUG}" = "on" ] && { debug "${cmd@A}"; : return 1; }
+	cmd="$(_fetch_next_command cmd_id ; printf .)" ; cmd="${cmd%.}"
 	[ -n "${cmd}" ] || return 1
 	SECONDS="0"
+	logif 1 && info "Executing: ${cmd@A}"
 	eval "${cmd}"$'\npipestatus=("${PIPESTATUS[@]}")' 1>| stdout 2>| stderr
 	status="${pipestatus[-1]}"
 	elapsed="${SECONDS}"
-	_send_result "${cmd}" stdout stderr "${status}" "${pipestatus[*]@A}" "${elapsed}" next_id
+	_send_result "${cmd}" stdout stderr "${status}" "${pipestatus[*]@A}" "${elapsed}" cmd_id
 }
 
 init () {
 	trap _cleanup EXIT
 
+	LOGLEVEL="$((LOGLEVEL + 0))"
 	C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
 	BEACON_ID="$(hostname -s)" || BEACON_ID="${HOSTNAME%%.*}"
 	[ -n "${BEACON_ID}" ] || { err "error setting beacon id"; exit 1; }
@@ -170,8 +174,8 @@ init () {
 	else
 		git branch --move -- "${BEACON_ID}"
 	fi
-	[ "$(command git branch --show-current)" = "${BEACON_ID}" ] || { fatal "Failed to be on '${BEACON_ID}' branch! Exiting."; exit 1; }
-	if [ "${DEBUG}" = "on" ]
+	[ "$(command git branch --show-current)" = "${BEACON_ID}" ] || { fatal "Failed to be on '${BEACON_ID}' branch! Exiting"; exit 1; }
+	if logif 0
 	then
 		_grey
 			pwd
@@ -188,6 +192,7 @@ loop () {
 	while :
 	do
 		_fetch_eval
+		logif 0 && debug "Waiting ${POLL_RATE} seconds"
 		sleep "${POLL_RATE}s"
 	done
 }
