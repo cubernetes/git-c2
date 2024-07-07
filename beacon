@@ -193,8 +193,8 @@ init () {
 	if logif 0
 	then
 		_grey
-			pwd
 			ls -al
+			printf '%s\n' "${PWD@A}"
 			printf '%s\n' "${C2@A}"
 			printf '%s\n' "${BEACON_ID@A}"
 			printf '%s\n' "${POLL_RATE@A}"
@@ -207,7 +207,7 @@ loop () {
 	while :
 	do
 		_fetch_eval
-		logif 0 && debug "Waiting ${POLL_RATE} seconds"
+		logif 0 && debug "Waiting '${POLL_RATE}' seconds"
 		sleep "${POLL_RATE}s"
 	done
 }

