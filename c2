@@ -16,16 +16,16 @@ log () {
 		(*) ansi="45;30" ;;
 	esac
 	printf "\033[${ansi}m%s: %s: %s: %s\033[m\n" "${0}" "${FUNCNAME[2]}" "${BASH_LINENO[1]}" "$*" >&2
-}
+} && export -f log
 
-critical () { log critical "${@}"; }
-fatal () { log fatal "${@}"; }
-err () { log err "${@}"; }
-warn () { log warn "${@}"; }
-info () { log info "${@}"; }
-debug () { log debug "${@}"; }
-_grey () { printf '\033[90m' >&2; }
-_rst () { printf '\033[m' >&2; }
+critical () { log critical "${@}"; } && export -f critical 
+fatal () { log fatal "${@}"; } && export -f fatal 
+err () { log err "${@}"; } && export -f err 
+warn () { log warn "${@}"; } && export -f warn 
+info () { log info "${@}"; } && export -f info 
+debug () { log debug "${@}"; } && export -f debug 
+_grey () { printf '\033[90m' >&2; } && export -f _grey 
+_rst () { printf '\033[m' >&2; } && export -f _rst 
 
 # Usage:
 # if logif -1; then hide; fi # never show this specific diagnostic
@@ -41,7 +41,7 @@ logif () {
 	required_loglevel="${1}"
 	[ -n "${required_loglevel}" ] || required_loglevel="999" # if not providing a parameter, always log
 	[ "${LOGLEVEL}" -le "${required_loglevel}" ]
-}
+} && export -f logif
 
 # Remove temporary directory and cd back to a sane place
 _cleanup () {
@@ -59,32 +59,33 @@ _cleanup () {
 }
 
 # Override git command to make it LOGLEVEL aware
-git () {
+_git () {
 	local subcomand
 	declare -i status
 
 	status="0"
 	subcomand="${1}"
-	[ -n "${subcomand}" ] || { command git; return 1; }
+	[ -n "${subcomand}" ] || { git; return 1; }
 	shift
 	if logif 0
 	then
 		_grey
-			1>&2 command git "${subcomand}" "${@}" ; status="${?}"
+			1>&2 git "${subcomand}" "${@}" ; status="${?}"
 		_rst
 		return "${status}"
 	else
-		2>/dev/null 1>&2 command git "${subcomand}" "${@}" ; status="${?}"
+		2>/dev/null 1>&2 git "${subcomand}" "${@}" ; status="${?}"
 		return "${status}"
 	fi
-}
+} && export -f _git
 
 _check_ref () {
-	git ls-remote --heads --exit-code c2 -- "${1}"
+	_git ls-remote --heads --exit-code c2 -- "${1}"
 }
 
 init () {
 	trap _cleanup EXIT
+	hash -r
 
 	LOGLEVEL="$((LOGLEVEL + 0))"
 	C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
@@ -95,16 +96,26 @@ init () {
 	orig_dir="$(pwd)" || { logif 3 && err "error saving original dir"; }
 	cd -- "${tmpdir}" || { logif 4 && fatal "error changing to tmpdir"; exit 1; }
 
-	git init
-	git remote add c2 -- "${C2}"
-	if _check_ref main
+	_git init
+	_git remote add c2 -- "${C2}"
+
+	_git fetch --all
+	for remote in $(git branch --remotes | grep -v /HEAD)
+	do
+		_git checkout --track "${remote}"
+	done
+
+	if _check_ref c2
 	then
-		git pull c2 main
-		git switch main
+		_git checkout c2
+		_git pull c2 c2
+		_git switch c2
 	else
-		git branch --move main
+		_git checkout --orphan c2 || _git checkout -b c2 || _git checkout c2
 	fi
-	[ "$(command git branch --show-current)" = "main" ] || { logif 4 && fatal "Failed to be on 'main' branch! Exiting"; exit 1; }
+	_git reset --hard
+
+	[ "$(git branch --show-current)" = "c2" ] || { logif 4 && fatal "Failed to be on 'c2' branch! Exiting"; exit 1; }
 	if logif 0
 	then
 		_grey
@@ -116,26 +127,156 @@ init () {
 			printf '\n'
 		_rst
 	fi
-	alias lb='gitc2-list-beacons'
-	alias r='gitc2-run'
+}
+
+_gitc2-sync-beacons () {
+	local remote
+
+	_git fetch --all
+	for remote in $(git branch --remotes | grep -v /HEAD)
+	do
+		_git checkout --track "${remote}"
+	done
+} && export -f _gitc2-sync-beacons
+
+gitc2-list-beacons () {
+	_gitc2-sync-beacons
+	git branch --format='%(refname:short)' | grep '^beacon-'
+} && export -f gitc2-list-beacons
+
+_gitc2-parse-beacons () {
+	local send_all
+	declare -a beacons=()
+
+	send_all="0"
+	while [ "${#}" -gt "0" ]
+	do
+		beacons+=("${1}")
+		[ "${1}" = "all" ] && { send_all="1"; break; }
+		shift
+	done
+	[ "${send_all}" = "1" ] && mapfile -t beacons < <(gitc2-list-beacons)
+	printf '%s\n' "${beacons[@]}"
+} && export -f _gitc2-parse-beacons
+
+gitc2-run () {
+	local cmd cmd_id beacon
+	declare -a beacons=()
+
+	cmd="${1}"
+	[ -n "${cmd}" ] && [ -n "${2}" ] || { warn "Usage: gitc2-run CMD BEACON [BEACON...]"; return 1; }
+	shift
+	mapfile -t beacons < <(_gitc2-parse-beacons "${@}")
+	_gitc2-sync-beacons
+	for beacon in "${beacons[@]}"
+	do
+		_git checkout c2
+		_git checkout -b "${beacon}" || _git checkout "${beacon}"
+		cmd_id="$(git log --author=in --format=%ae | sort -nr | head -1)"
+		cmd_id="$((cmd_id + 1))"
+		# _git pull c2 "${beacon}"
+		GIT_AUTHOR_NAME="in" GIT_AUTHOR_EMAIL="${cmd_id}" \
+			_git commit --allow-empty --message="${cmd}"
+		logif 1 && warn "Beacon '${beacon}': commiting command (${cmd_id}): '${cmd}'"
+	done
+	# _git push c2 "${beacon}"
+	logif 1 && warn "Pushing to all beacons..."
+	_git push c2 --all
+} && export -f gitc2-run
+
+gitc2-volume () {
+	local vol_perc
+
+	vol_perc="${1}"
+	[ -n "${vol_perc}" ] || {  warn "Usage: gitc2-volume PERCENTAGE BEACON [BEACON...]"; return 1; }
+	shift
+	gitc2-run "pactl set-sink-mute @DEFAULT_SINK@ false; pactl set-sink-volume @DEFAULT_SINK@ '${vol_perc}%'" "${@}"
+} && export -f gitc2-volume
+
+gitc2-brightness () {
+	local bright_perc bright_frac
+
+	bright_perc="${1}"
+	[ -n "${bright_perc}" ] || {  warn "Usage: gitc2-brightness PERCENTAGE BEACON [BEACON...]"; return 1; }
+	shift
+	bright_frac="$(echo "scale=2; ${bright_perc}/100" | bc)"
+	gitc2-run "xrandr --output HDMI-2 --brightness '${bright_frac}'" "${@}"
+} && export -f gitc2-brightness
+
+gitc2-full-physical-brightness () {
+	gitc2-run 'for _ in {1..25}; do LD_LIBRARY_PATH="." ./xdotool key XF86MonBrightnessUp; done' "${@}"
+} && export -f gitc2-full-physical-brightness
+
+gitc2-low-physical-brightness () {
+	gitc2-run 'for _ in {1..25}; do LD_LIBRARY_PATH="." ./xdotool key XF86MonBrightnessDown; done' "${@}"
+} && export -f gitc2-low-physical-brightness
+
+gitc2-stage-file () {
+	local file_path file_name
+	declare -a beacons=()
+
+	file_path="${1}"
+	[ -n "${file_path}" ] && [ -n "${2}" ] || { warn "Usage: gitc2-stage-file FILE_PATH BEACON [BEACON...]"; return 1; }
+	[ -f "${file_path}" ] && [ -r "${file_path}" ] || { err "Error, file '${file_path}' is not accessible"; return 1; }
+	file_name="$(basename -- "${file_path}")"
+	shift
+	mapfile -t beacons < <(_gitc2-parse-beacons "${@}")
+
+	_git checkout c2
+	cp --force "${file_path}" .
+	_git add --force "${file_name}"
+	_git commit --allow-empty --message="Add '${file_name}'"
+
+	_gitc2-sync-beacons
+	for beacon in "${beacons[@]}"
+	do
+		_git checkout -b "${beacon}" || _git checkout "${beacon}"
+		_git pull c2 "${beacon}"
+		_git merge --no-edit c2
+		logif 1 && warn "Beacon '${beacon}': staged file: '${file_name}' (will be pushed on next command)"
+	done
+	_git checkout c2
+} && export -f gitc2-stage-file
+
+# TODO: Add completions
+inject_env () {
+	echo 'alias lb="gitc2-list-beacons"'
+	echo 'alias r="gitc2-run"'
+	echo 'alias v="gitc2-volume"'
+	echo 'alias b="gitc2-brightness"'
+	echo 'alias b="gitc2-brightness"'
+	echo 'alias pfb="gitc2-full-physical-brightness"'
+	echo 'alias plb="gitc2-low-physical-brightness"'
+	echo 'alias sf="gitc2-stage-file"'
+	echo 'readonly PS1="(gitc2) ${PS1}"'
+	echo "readonly GITC2_ID='$$'"
 }
 
 main () {
 	init "${@}"
-	logif 1 && info "You are in an interactive bash shell."
-	logif 1 && info "The following (unexported) shell functions are available:"
-	logif 1 && info $'\t'"- gitc2-list-beacons [--terse]"
-	logif 1 && info $'\t'"- gitc2-run CMD BEACON [BEACON...]"
-	logif 1 && info $'\t'"- gitc2-volume PERCENTAGE BEACON [BEACON...]"
-	logif 1 && info $'\t'"- gitc2-brightness PERCENTAGE BEACON [BEACON...]"
-	logif 1 && info $'\t'"- Arguments:"
-	logif 1 && info $'\t\t'"- BEACON: either a beacon id or 'all' selecting all beacons. 'all' cannot be negated"
-	logif 1 && info "Additionally, the following aliases are available:"
-	logif 1 && info $'\t'"- lb='gitc2-list-beacons'"
-	logif 1 && info $'\t'"- r='gitc2-run'"
-	logif 1 && info $'\t'"- v='gitc2-volume'"
-	logif 1 && info $'\t'"- b='gitc2-brightness'"
-	# bash -i
+	logif 1 && {
+		info "You are in an interactive bash shell."
+		info "The following shell functions are available:"
+		info $'\t'"- gitc2-list-beacons [--terse|-t]"
+		info $'\t'"- gitc2-run CMD BEACON [BEACON...]"
+		info $'\t'"- gitc2-volume PERCENTAGE BEACON [BEACON...]"
+		info $'\t'"- gitc2-brightness PERCENTAGE BEACON [BEACON...]"
+		info $'\t'"- gitc2-full-physical-brightness BEACON [BEACON...]"
+		info $'\t'"- gitc2-low-physical-brightness BEACON [BEACON...]"
+		info $'\t'"- gitc2-stage-file FILE_PATH BEACON [BEACON...]"
+		info $'\t'"- Arguments:"
+		info $'\t\t'"- BEACON: either a beacon id (must start with 'beacon-') or 'all' selecting all beacons (no syntax yet to deselect beacons from 'all')."
+		info "Additionally, the following aliases are available:"
+		info $'\t'"- lb='gitc2-list-beacons'"
+		info $'\t'"- r='gitc2-run'"
+		info $'\t'"- v='gitc2-volume'"
+		info $'\t'"- b='gitc2-brightness'"
+		info $'\t'"- pfb='gitc2-full-physical-brightness'"
+		info $'\t'"- plb='gitc2-low-physical-brightness'"
+		info $'\t'"- sf='gitc2-stage-file'"
+		warn "Note that gitc2-volume and gitc2-brightness are just convenience functions that call xrandr and pactl respectively"
+	}
+	bash --rcfile <(2>/dev/null cat ~/.bashrc; inject_env) -i
 }
 
 main "${@}"

