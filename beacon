@@ -92,7 +92,7 @@ _fetch_next_command () {
 
 	_check_ref "${BEACON_ID}" \
 		|| { logif 2 && warn "Pull failed (ref '${BEACON_ID}' doesnt exist)"; return 1; }
-	_git pull c2 -- "${BEACON_ID}" \
+	_git pull --rebase c2 -- "${BEACON_ID}" \
 		|| { logif 2 && warn "Pull failed"; return 1; }
 	cmd_id="$(comm -23 <(git log --author=in --format=%ae | sort) <(git log --author=out --format=%ae | sort) | sort -n | head -1)"
 	[ -n "${cmd_id}" ] || return 1

